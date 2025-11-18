@@ -1,16 +1,22 @@
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <ratio>
 #include <string>
 #include <vector>
 
 using namespace std::chrono;
 
-const uint32_t ARRAY_READS_COUNT = 2'000'000u;
-const uint32_t PAGE_SIZE = (1 << 18); // 256 KB
+const uint32_t ARRAY_READS_COUNT = 1'000'000;
+const uint32_t WARNUP_READS_COUNT = 5000;
+const uint32_t BATCHES_COUNT = 5;
+const uint32_t PAGE_SIZE = (1 << 14); // 16 KB
+std::mt19937 gen(239);
 
 using timetype = std::chrono::nanoseconds;
 
@@ -40,10 +46,21 @@ uint32_t log2(uint32_t n) {
   return log;
 }
 
-timetype timeOfArrayRead(uint32_t stride, uint32_t elems, uint32_t readsCount) {
-  volatile uint32_t sink = 0; // prevents optimization
+void fillDirectIndexes(uint32_t stride, uint32_t elems) {
+  // direct indexes
+  for (uint32_t i = 0; i <= stride * (elems - 1); i += stride) {
+    if (i == stride * (elems - 1)) {
+      // loop back
+      array[i] = 0;
+      break;
+    } else {
+      array[i] = (i + stride);
+    }
+  }
+}
 
-  // reverse indexes:
+void fillReverseIndexes(uint32_t stride, uint32_t elems) {
+  // reverse indexes
   // 0  i1 i2 i3 ... in
   // in 0  i1 i2 ... in-1
   for (uint32_t i = stride * (elems - 1), cnt = 0; cnt < elems;
@@ -56,32 +73,55 @@ timetype timeOfArrayRead(uint32_t stride, uint32_t elems, uint32_t readsCount) {
       array[i] = (i - stride);
     }
   }
+}
 
-  // direct indexes
-  // for (uint32_t i = 0; i <= stride * (elems - 1); i += stride) {
-  //   if (i == stride * (elems - 1)) {
-  //     // loop back
-  //     array[i] = 0;
-  //     break;
-  //   } else {
-  //     array[i] = (i + stride);
-  //   }
-  // }
-
-  // 2k read to warm up cache
-  for (uint32_t i = 0, idx = 0; i < 5000; i++) {
-    idx = array[idx];
-    sink = idx;
+void fillShuffledIndexes(uint32_t stride, uint32_t elems, uint32_t seed = 42) {
+  // shuffled indexes
+  std::vector<uint32_t> indexes(elems);
+  for (uint32_t i = 0; i < elems; i++) {
+    indexes[i] = i;
   }
 
-  steady_clock::time_point start = steady_clock::now();
-  for (uint32_t i = 0, idx = 0; i < readsCount; i++) {
-    idx = array[idx];
-    sink = idx;
-  }
-  steady_clock::time_point end = steady_clock::now();
+  // simple shuffle
+  std::shuffle(indexes.begin(), indexes.end(), gen);
 
-  auto diff = duration_cast<timetype>(end - start);
+  for (uint32_t i = 0; i < elems; i++) {
+    if (i == elems - 1) {
+      array[indexes[i] * stride] = indexes[0] * stride;
+    } else {
+      array[indexes[i] * stride] = indexes[i + 1] * stride;
+    }
+  }
+}
+
+timetype timeOfArrayRead(uint32_t stride, uint32_t elems, uint32_t readsCount,
+                         uint32_t warnupReadsCount, uint32_t batchesCount) {
+  volatile uint32_t sink = 0; // prevents optimization
+
+  timetype diff = timetype::zero();
+  uint32_t iterationsPerBatch = readsCount;
+  for (uint32_t batch = 0; batch < batchesCount; ++batch) {
+    // fill indexes
+    fillShuffledIndexes(stride, elems);
+
+    // some reads to warm up cache
+    for (uint32_t i = 0, idx = 0; i < warnupReadsCount; i++) {
+      idx = array[idx];
+      sink = idx;
+    }
+
+    // measure
+    steady_clock::time_point start = steady_clock::now();
+    for (uint32_t i = 0, idx = 0; i < iterationsPerBatch; i++) {
+      idx = array[idx];
+      sink = idx;
+    }
+    steady_clock::time_point end = steady_clock::now();
+    diff += duration_cast<timetype>(end - start);
+  }
+
+  diff /= batchesCount;
+
   return diff;
 }
 
@@ -92,12 +132,10 @@ bool deltaDiff(timetype currentTime, timetype prevTime, double fraction) {
 }
 
 void capacityAndAssociativity(uint32_t maxMemory, uint32_t maxAssoc,
-                              uint32_t maxStride) {
-  uint32_t minStride = 16; // bytes
+                              uint32_t maxStride, uint32_t minStride) {
   uint32_t timeFactor = 10'000;
   uint32_t stride = minStride / sizeof(uint32_t); // elements
   uint32_t stridePow = 0;
-  uint32_t elems = 1;
   timetype currentTime;
   timetype prevTime;
   // matrix elems x strides
@@ -107,10 +145,11 @@ void capacityAndAssociativity(uint32_t maxMemory, uint32_t maxAssoc,
                                        std::vector<bool>(maxStride, false));
 
   while (stride * sizeof(uint32_t) <= maxStride) {
-    elems = 1;
+    uint32_t elems = 1;
     // calculate time jumps
     while (elems < maxAssoc) {
-      currentTime = timeOfArrayRead(stride, elems, ARRAY_READS_COUNT);
+      currentTime = timeOfArrayRead(stride, elems, ARRAY_READS_COUNT,
+                                    WARNUP_READS_COUNT, BATCHES_COUNT);
       times[elems][stridePow] = currentTime;
 
       if (elems > 1) {
@@ -143,7 +182,7 @@ void capacityAndAssociativity(uint32_t maxMemory, uint32_t maxAssoc,
   }
   std::cout << std::endl;
 
-  for (uint32_t s = 1; s < maxAssoc; s++) {
+  for (uint32_t s = 1; s < maxAssoc; s *= 2) {
     std::cout << std::setw(width) << s;
     for (uint32_t p = 0; p < stridePow; p++) {
       auto time = times[s][p].count() / timeFactor;
@@ -159,6 +198,7 @@ int main() {
   uint32_t maxMemory = (1 << 30); // 1 GB
   uint32_t maxAssoc = 32;
   uint32_t maxStride = (1 << 25); // 32 MB
+  uint32_t minStride = 16;        // 16 B
 
   rassert(maxAssoc * maxStride <= maxMemory, 1);
 
@@ -168,7 +208,7 @@ int main() {
   std::cout << "array: " << array << std::endl;
   std::cout << "len: " << arrayLen << std::endl;
 
-  capacityAndAssociativity(maxMemory, maxAssoc + 1, maxStride);
+  capacityAndAssociativity(maxMemory, maxAssoc + 1, maxStride, minStride);
 
   free(array);
   return 0;
