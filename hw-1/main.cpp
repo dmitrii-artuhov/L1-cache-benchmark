@@ -14,7 +14,7 @@ using namespace std::chrono;
 
 const uint32_t ARRAY_READS_COUNT = 1'000'000;
 const uint32_t WARMUP_READS_COUNT = 2000;
-const uint32_t BATCHES_COUNT = 3;
+const uint32_t BATCHES_COUNT = 5;
 const uint32_t PAGE_SIZE = (1 << 14); // 16 KB
 std::mt19937 gen(239);
 
@@ -119,7 +119,7 @@ void fillShuffledIndexes(uint32_t stride, uint32_t elems, uint32_t seed = 42) {
 }
 
 timetype timeOfArrayRead(uint32_t stride, uint32_t elems, uint32_t readsCount,
-                         uint32_t warnupReadsCount, uint32_t batchesCount) {
+                         uint32_t warmupReadsCount, uint32_t batchesCount) {
   volatile uint32_t sink = 0; // prevents optimization
 
   timetype diff = timetype::zero();
@@ -129,7 +129,7 @@ timetype timeOfArrayRead(uint32_t stride, uint32_t elems, uint32_t readsCount,
     fillShuffledIndexes(stride, elems);
 
     // some reads to warm up cache
-    for (uint32_t i = 0, idx = 0; i < warnupReadsCount; i++) {
+    for (uint32_t i = 0, idx = 0; i < warmupReadsCount; i++) {
       idx = array[idx];
       sink = idx;
     }
@@ -194,7 +194,7 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t maxStride,
 
   // calculate cumulative jumps
   uint32_t span = 4;
-  double fraction = 0.5;
+  double fraction = 0.3;
   for (uint32_t p = 0; p < stridePow; p++) {
     for (uint32_t elem = span + 1; elem + span <= maxAssoc; elem++) {
       // find a jump between averaged time[(elem - span)..elem) and
@@ -225,19 +225,18 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t maxStride,
 
       uint32_t assoc = elem;
       uint32_t stride = p;
-      while (assoc >= 1 && stride < stridePow) {
+      while (assoc >= 1 && stride + 2 < stridePow) {
         bool jumpMoved = jumps[assoc / 2][stride + 1];
-        bool jumpStayed = jumps[assoc][stride + 1];
+        bool jumpThenStayed = jumps[assoc / 2][stride + 2];
 
-        if (!jumpMoved) {
-          if (jumpStayed) {
-            // found the end of the sequence
-            cacheAssociativity = assoc;
-            uint32_t strideShift = minStride / sizeof(uint32_t);
-            cacheSize = (1 << (stride + strideShift)) * cacheAssociativity;
-            found = true;
-          }
-          // the sequence either broke or we found its end
+        if (!jumpMoved) break;
+
+        if (jumpMoved && jumpThenStayed) {
+          // found the end of the sequence
+          cacheAssociativity = assoc / 2;
+          uint32_t strideShift = minStride / sizeof(uint32_t);
+          cacheSize = (1 << ((stride + 1) + strideShift)) * cacheAssociativity;
+          found = true;
           break;
         }
 
@@ -248,7 +247,7 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t maxStride,
   }
 
   // print a table
-  prettyPrint(maxAssoc, minStride, stridePow, times, jumps, 10, 10'000);
+  prettyPrint(maxAssoc, minStride, stridePow, times, jumps, 8, 10'000);
 
   return {cacheAssociativity, cacheSize, found};
 }
