@@ -13,8 +13,8 @@
 using namespace std::chrono;
 
 const uint32_t ARRAY_READS_COUNT = 1'000'000;
-const uint32_t WARNUP_READS_COUNT = 5000;
-const uint32_t BATCHES_COUNT = 5;
+const uint32_t WARMUP_READS_COUNT = 5000;
+const uint32_t BATCHES_COUNT = 4;
 const uint32_t PAGE_SIZE = (1 << 14); // 16 KB
 std::mt19937 gen(239);
 
@@ -44,6 +44,30 @@ uint32_t log2(uint32_t n) {
   while (n >>= 1)
     ++log;
   return log;
+}
+
+void prettyPrint(uint32_t maxAssoc, uint32_t minStride, uint32_t stridePow,
+                 const std::vector<std::vector<timetype>> &times,
+                 const std::vector<std::vector<bool>> &jumps, uint32_t width,
+                 uint32_t timeFactor) {
+  // printing results
+  std::cout << std::setw(width) << "s/e";
+  for (uint32_t p = 0; p < stridePow; p++) {
+    uint32_t bytes = (1 << p) * minStride;
+    std::cout << std::setw(width) << bytesToString(bytes);
+  }
+  std::cout << std::endl;
+
+  for (uint32_t s = 1; s < maxAssoc; s++) {
+    std::cout << std::setw(width) << s;
+    for (uint32_t p = 0; p < stridePow; p++) {
+      auto time = times[s][p].count() / timeFactor;
+      std::string timeWithJump =
+          (jumps[s][p] ? "[+]" : "") + std::to_string(time);
+      std::cout << std::setw(width) << timeWithJump;
+    }
+    std::cout << std::endl;
+  }
 }
 
 void fillDirectIndexes(uint32_t stride, uint32_t elems) {
@@ -125,73 +149,105 @@ timetype timeOfArrayRead(uint32_t stride, uint32_t elems, uint32_t readsCount,
   return diff;
 }
 
-bool deltaDiff(timetype currentTime, timetype prevTime, double fraction) {
+bool isSufficientDelta(timetype currentTime, timetype prevTime,
+                       double fraction) {
   auto delta = currentTime - prevTime;
-  return currentTime > prevTime &&
-         static_cast<double>(delta.count()) / prevTime.count() > fraction;
+  auto div = static_cast<double>(delta.count()) / prevTime.count();
+  return delta > timetype::zero() && div > fraction;
 }
 
-void capacityAndAssociativity(uint32_t maxMemory, uint32_t maxAssoc,
-                              uint32_t maxStride, uint32_t minStride) {
-  uint32_t timeFactor = 10'000;
+timetype getAveragedDelta(const std::vector<std::vector<timetype>> &times,
+                          uint32_t fromElem, uint32_t toElem,
+                          uint32_t stridePow) {
+  rassert(fromElem < toElem, 3);
+  timetype total = timetype::zero();
+  for (uint32_t elem = fromElem; elem < toElem; elem++) {
+    total += times[elem][stridePow];
+  }
+  return total / (toElem - fromElem);
+}
+
+std::tuple<uint32_t, uint32_t, bool>
+capacityAndAssociativity(uint32_t maxAssoc, uint32_t maxStride,
+                         uint32_t minStride) {
   uint32_t stride = minStride / sizeof(uint32_t); // elements
   uint32_t stridePow = 0;
-  timetype currentTime;
-  timetype prevTime;
   // matrix elems x strides
   std::vector<std::vector<timetype>> times(
       maxAssoc, std::vector<timetype>(maxStride, timetype{}));
   std::vector<std::vector<bool>> jumps(maxAssoc,
                                        std::vector<bool>(maxStride, false));
 
+  // calculate averaged execution times for each (elems, stride)
   while (stride * sizeof(uint32_t) <= maxStride) {
     uint32_t elems = 1;
     // calculate time jumps
     while (elems < maxAssoc) {
-      currentTime = timeOfArrayRead(stride, elems, ARRAY_READS_COUNT,
-                                    WARNUP_READS_COUNT, BATCHES_COUNT);
+      timetype currentTime = timeOfArrayRead(stride, elems, ARRAY_READS_COUNT,
+                                             WARMUP_READS_COUNT, BATCHES_COUNT);
       times[elems][stridePow] = currentTime;
-
-      if (elems > 1) {
-        bool isJump = false; // deltaDiff(currentTime, prevTime, 0.0);
-        if (isJump) {
-          jumps[elems][stridePow] = true;
-          // std::cout << "Jump detected at elems=" << elems
-          //           << " stride=" << bytesToString(stride * sizeof(uint32_t))
-          //           << " time=" << currentTime.count() / timeFactor
-          //           << " prevTime=" << prevTime.count() / timeFactor
-          //           << std::endl;
-        }
-      }
-
       elems++;
-      prevTime = currentTime;
     }
-
-    // TODO: check for movement, then double the stride, otherwise break
     stride *= 2;
     stridePow++;
   }
 
-  // printing results
-  int width = 10;
-  std::cout << std::setw(width) << "s/e";
+  // calculate cumulative jumps
+  uint32_t span = 4;
+  double fraction = 0.5;
   for (uint32_t p = 0; p < stridePow; p++) {
-    uint32_t bytes = (1 << p) * minStride;
-    std::cout << std::setw(width) << bytesToString(bytes);
-  }
-  std::cout << std::endl;
-
-  for (uint32_t s = 1; s < maxAssoc; s *= 2) {
-    std::cout << std::setw(width) << s;
-    for (uint32_t p = 0; p < stridePow; p++) {
-      auto time = times[s][p].count() / timeFactor;
-      std::string timeWithJump =
-          (jumps[s][p] ? "[+]" : "") + std::to_string(time);
-      std::cout << std::setw(width) << timeWithJump;
+    for (uint32_t elem = span + 1; elem + span <= maxAssoc; elem++) {
+      // find a jump between averaged time[(elem - span)..elem) and
+      // time[elem..(elem + span)) for some fixed p
+      timetype prevDelta = getAveragedDelta(times, elem - span, elem, p);
+      timetype currentDelta = getAveragedDelta(times, elem, elem + span, p);
+      bool isJump = isSufficientDelta(currentDelta, prevDelta, fraction);
+      jumps[elem - 1][p] = isJump; // write at elem - 1, so that we see jumps at
+                                   // elems 2^t and not 2^t + 1 indexes
     }
-    std::cout << std::endl;
   }
+
+  // since we only target the cpu L1 cache,
+  // for its calculation we need to find the first movement sequence:
+  // jump at
+  // 2^(t+k) -> 2^(t+k-1) -> ... ->    2^t    ->   2^t      (no jump at the end)
+  //   s          2 * s            2^(k-1) * s   2^k * s
+  // then the cache associativity will be 2^t and the cache size will be
+  // (2^(k-1) * s) * associativity
+  uint32_t cacheAssociativity = 0;
+  uint32_t cacheSize = 0;
+  bool found = false;
+
+  for (uint32_t p = 0; p < stridePow && !found; p++) {
+    for (uint32_t elem = 1; elem < maxAssoc && !found; elem *= 2) {
+      if (!jumps[elem][p])
+        continue;
+
+      uint32_t assoc = elem;
+      uint32_t stride = p;
+      while (assoc >= 1 && stride < stridePow) {
+        bool jumpMoved = jumps[assoc / 2][stride + 1];
+        bool jumpStayed = jumps[assoc][stride + 1];
+
+        if (!jumpMoved && jumpStayed) {
+          // found the end of the sequence
+          cacheAssociativity = assoc;
+          uint32_t strideShift = minStride / sizeof(uint32_t);
+          cacheSize = (1 << (stride + strideShift)) * cacheAssociativity;
+          found = true;
+          break;
+        }
+
+        assoc /= 2;
+        stride++;
+      }
+    }
+  }
+
+  // print a table
+  prettyPrint(maxAssoc, minStride, stridePow, times, jumps, 10, 10'000);
+
+  return {cacheAssociativity, cacheSize, found};
 }
 
 int main() {
@@ -208,7 +264,19 @@ int main() {
   std::cout << "array: " << array << std::endl;
   std::cout << "len: " << arrayLen << std::endl;
 
-  capacityAndAssociativity(maxMemory, maxAssoc + 1, maxStride, minStride);
+  auto [cacheAssociativity, cacheSize, detected] =
+      capacityAndAssociativity(maxAssoc + 1, maxStride, minStride);
+
+  if (detected) {
+
+    std::cout << "Detected L1 cache associativity: " << cacheAssociativity
+              << std::endl;
+    std::cout << "Detected L1 cache size: " << bytesToString(cacheSize)
+              << std::endl;
+  } else {
+    std::cout << "Could not detect L1 cache associativity and size."
+              << std::endl;
+  }
 
   free(array);
   return 0;
