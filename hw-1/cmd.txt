@@ -1,2 +1,0 @@
-sysctl -a # Mac
-lscpu     # Linux

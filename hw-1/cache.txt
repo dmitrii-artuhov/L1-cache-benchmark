@@ -1,0 +1,6 @@
+# Mac
+sysctl -a
+# Linux
+lscpu
+ls /sys/devices/system/cpu/cpu0/cache/index0/
+cat required_file_in_index0 
