@@ -16,6 +16,7 @@ const uint32_t WARMUP_READS_COUNT = 5000;
 const uint32_t BATCHES_COUNT = 5;
 const uint32_t PAGE_SIZE = (1 << 14); // 16 KB
 const uint32_t TIME_DIV_FACTOR = 10'000;
+bool debug = false;
 std::mt19937 gen(239);
 
 using timetype = std::chrono::nanoseconds;
@@ -28,6 +29,14 @@ void rassert(bool expr, uint32_t id) {
     std::cerr << "Assertion failed: " << id << std::endl;
     std::exit(1);
   }
+}
+
+std::ostream &log() {
+  if (debug) {
+    return std::cout;
+  }
+  static std::ostream noopStream = std::ostream(nullptr);
+  return noopStream;
 }
 
 std::string bytesToString(uint32_t bytes) {
@@ -68,22 +77,22 @@ void prettyPrint(uint32_t maxAssoc, uint32_t minStride, uint32_t stridePow,
                  const std::vector<std::vector<bool>> &jumps, uint32_t width,
                  uint32_t timeFactor) {
   // printing results
-  std::cout << std::setw(width) << "s/e";
+  log() << std::setw(width) << "s/e";
   for (uint32_t p = 0; p < stridePow; p++) {
     uint32_t bytes = (1 << p) * minStride;
-    std::cout << std::setw(width) << bytesToString(bytes);
+    log() << std::setw(width) << bytesToString(bytes);
   }
-  std::cout << std::endl;
+  log() << std::endl;
 
   for (uint32_t s = 1; s < maxAssoc; s++) {
-    std::cout << std::setw(width) << s;
+    log() << std::setw(width) << s;
     for (uint32_t p = 0; p < stridePow; p++) {
       auto time = times[s][p].count() / timeFactor;
       std::string timeWithJump =
           (jumps[s][p] ? "[+]" : "") + std::to_string(time);
-      std::cout << std::setw(width) << timeWithJump;
+      log() << std::setw(width) << timeWithJump;
     }
-    std::cout << std::endl;
+    log() << std::endl;
   }
 }
 
@@ -293,17 +302,16 @@ std::tuple<uint32_t, bool> lineSize(uint32_t minStride, uint32_t cacheSize) {
         timeOfArrayRead(higherStride, baseRightSpots, ARRAY_READS_COUNT,
                         WARMUP_READS_COUNT, BATCHES_COUNT);
 
-    std::cout << "Base stride: "
-              << bytesToString(higherStride * sizeof(uint32_t))
-              << ", Spots: " << baseSpots << ", AMAT: "
-              << static_cast<double>(baseTime.count()) / ARRAY_READS_COUNT
-              << std::endl;
-    std::cout << "  Left AMAT: "
-              << static_cast<double>(baseLeftTime.count()) / ARRAY_READS_COUNT
-              << " (spots: " << baseLeftSpots << ")"
-              << ", Right AMAT: "
-              << static_cast<double>(baseRightTime.count()) / ARRAY_READS_COUNT
-              << " (spots: " << baseRightSpots << ")" << std::endl;
+    log() << "Base stride: " << bytesToString(higherStride * sizeof(uint32_t))
+          << ", Spots: " << baseSpots << ", AMAT: "
+          << static_cast<double>(baseTime.count()) / ARRAY_READS_COUNT
+          << std::endl;
+    log() << "  Left AMAT: "
+          << static_cast<double>(baseLeftTime.count()) / ARRAY_READS_COUNT
+          << " (spots: " << baseLeftSpots << ")"
+          << ", Right AMAT: "
+          << static_cast<double>(baseRightTime.count()) / ARRAY_READS_COUNT
+          << " (spots: " << baseRightSpots << ")" << std::endl;
 
     uint32_t jumpsCount = 0;
     for (uint32_t lp = 1; lp < p; lp++) { // lower stride pow
@@ -316,12 +324,11 @@ std::tuple<uint32_t, bool> lineSize(uint32_t minStride, uint32_t cacheSize) {
           higherStride + lowerStride, spotsWhenHigherStrideIsLessThanLineSize,
           ARRAY_READS_COUNT, WARMUP_READS_COUNT, BATCHES_COUNT);
 
-      std::cout << "Lower stride: "
-                << bytesToString(lowerStride * sizeof(uint32_t))
-                << ", Spots: " << spotsWhenHigherStrideIsLessThanLineSize
-                << ", AMAT: "
-                << static_cast<double>(currentTime.count()) / ARRAY_READS_COUNT
-                << std::endl;
+      log() << "Lower stride: " << bytesToString(lowerStride * sizeof(uint32_t))
+            << ", Spots: " << spotsWhenHigherStrideIsLessThanLineSize
+            << ", AMAT: "
+            << static_cast<double>(currentTime.count()) / ARRAY_READS_COUNT
+            << std::endl;
 
       uint32_t leftSpots =
           spotsWhenHigherStrideIsLessThanLineSize -
@@ -335,15 +342,15 @@ std::tuple<uint32_t, bool> lineSize(uint32_t minStride, uint32_t cacheSize) {
       timetype rightTime =
           timeOfArrayRead(higherStride + lowerStride, rightSpots,
                           ARRAY_READS_COUNT, WARMUP_READS_COUNT, BATCHES_COUNT);
-      std::cout << "  Left AMAT: "
-                << static_cast<double>(leftTime.count()) / ARRAY_READS_COUNT
-                << " (spots: " << leftSpots << ")"
-                << ", Right AMAT: "
-                << static_cast<double>(rightTime.count()) / ARRAY_READS_COUNT
-                << " (spots: " << rightSpots << ")";
+      log() << "  Left AMAT: "
+            << static_cast<double>(leftTime.count()) / ARRAY_READS_COUNT
+            << " (spots: " << leftSpots << ")"
+            << ", Right AMAT: "
+            << static_cast<double>(rightTime.count()) / ARRAY_READS_COUNT
+            << " (spots: " << rightSpots << ")";
 
       bool isJump = isSufficientIncrease(rightTime, leftTime, 0.3);
-      std::cout << ", isJump: " << isJump << std::endl;
+      log() << ", isJump: " << isJump << std::endl;
       jumpsCount += isJump;
     }
 
@@ -354,13 +361,17 @@ std::tuple<uint32_t, bool> lineSize(uint32_t minStride, uint32_t cacheSize) {
       return {lineSize, true};
     }
 
-    std::cout << "==========" << std::endl;
+    log() << "==========" << std::endl;
   }
 
   return {0, false};
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+  if (argc > 1 && std::string(argv[1]) == "--debug") {
+    debug = true;
+  }
+
   uint32_t maxMemory = (1 << 30); // 1 GB
   uint32_t maxAssoc = 32;
   uint32_t maxStride = (1 << 23); // 8 MB
@@ -389,7 +400,7 @@ int main() {
 
   auto [lineSizeBytes, lineSizeDetected] = lineSize(minStride, cacheSize);
   if (lineSizeDetected) {
-    std::cout << "Detected cache line size: " << lineSizeBytes << " bytes"
+    std::cout << "Detected cache line size: " << bytesToString(lineSizeBytes)
               << std::endl;
   } else {
     std::cout << "Could not detect cache line size." << std::endl;
