@@ -1,2 +1,2 @@
-sysctl -a | grep cache # Mac
-lscpu  -a | grep cache # Linux
+sysctl -a # Mac
+lscpu     # Linux
