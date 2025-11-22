@@ -12,9 +12,9 @@
 using namespace std::chrono;
 
 const uint32_t ARRAY_READS_COUNT = 1'000'000;
-const uint32_t WARMUP_READS_COUNT = 5000;
+const uint32_t WARMUP_READS_COUNT = 5'000;
 const uint32_t BATCHES_COUNT = 5;
-const uint32_t PAGE_SIZE = (1 << 14); // 16 KB
+const uint32_t PAGE_SIZE = (1 << 16); // 64 KB
 const uint32_t TIME_DIV_FACTOR = 10'000;
 bool debug = false;
 std::mt19937 gen(239);
@@ -147,7 +147,6 @@ void fillShuffledIndexes(uint32_t stride, uint32_t elems) {
 timetype timeOfArrayRead(uint32_t stride, uint32_t elems, uint32_t readsCount,
                          uint32_t warmupReadsCount, uint32_t batchesCount) {
   volatile uint32_t sink = 0; // prevents optimization
-
   timetype diff = timetype::zero();
   uint32_t iterationsPerBatch = readsCount;
   for (uint32_t batch = 0; batch < batchesCount; ++batch) {
@@ -169,9 +168,7 @@ timetype timeOfArrayRead(uint32_t stride, uint32_t elems, uint32_t readsCount,
     steady_clock::time_point end = steady_clock::now();
     diff += duration_cast<timetype>(end - start);
   }
-
   diff /= batchesCount;
-
   return diff;
 }
 
@@ -301,17 +298,6 @@ std::tuple<uint32_t, bool> lineSize(uint32_t minStride, uint32_t cacheSize) {
         timeOfArrayRead(higherStride, baseRightSpots, ARRAY_READS_COUNT,
                         WARMUP_READS_COUNT, BATCHES_COUNT);
 
-    uint32_t smallestRightSpots = baseRightSpots;
-    timetype smallestRightTime = timetype::zero();
-    for (uint32_t sp = baseSpots, step = 10; sp <= baseRightSpots; sp += step) {
-      smallestRightTime = timeOfArrayRead(higherStride, sp, ARRAY_READS_COUNT,
-                                          WARMUP_READS_COUNT, BATCHES_COUNT);
-      bool isJump = isSufficientIncrease(baseTime, smallestRightTime, fraction);
-      if (isJump) {
-        smallestRightSpots = sp;
-      }
-    }
-
     log() << "Base stride: " << bytesToString(higherStride * sizeof(uint32_t))
           << ", Spots: " << baseSpots << ", AMAT: "
           << static_cast<double>(baseTime.count()) / ARRAY_READS_COUNT
@@ -321,13 +307,10 @@ std::tuple<uint32_t, bool> lineSize(uint32_t minStride, uint32_t cacheSize) {
           << " (spots: " << baseLeftSpots << ")"
           << ", Right AMAT: "
           << static_cast<double>(baseRightTime.count()) / ARRAY_READS_COUNT
-          << " (spots: " << baseRightSpots << ")"
-          << ", Smallest right AMAT: "
-          << static_cast<double>(smallestRightTime.count()) / ARRAY_READS_COUNT
-          << " (spots: " << smallestRightSpots << ")" << std::endl;
+          << " (spots: " << baseRightSpots << ")" << std::endl;
 
     uint32_t jumpsCount = 0;
-    for (uint32_t lp = 1; lp < p; lp++) { // lower stride pow
+    for (uint32_t lp = 0; lp < p; lp++) { // lower stride pow
       // find the elems count where the jump occurs for stride (p + lp)
       // save
       uint32_t lowerStride = (1 << lp);
@@ -351,7 +334,7 @@ std::tuple<uint32_t, bool> lineSize(uint32_t minStride, uint32_t cacheSize) {
                           ARRAY_READS_COUNT, WARMUP_READS_COUNT, BATCHES_COUNT);
       // small step to the right, exact base spots does not always differs
       // enough
-      uint32_t rightSpots = smallestRightSpots;
+      uint32_t rightSpots = baseRightSpots;
       timetype rightTime =
           timeOfArrayRead(higherStride + lowerStride, rightSpots,
                           ARRAY_READS_COUNT, WARMUP_READS_COUNT, BATCHES_COUNT);
@@ -372,7 +355,7 @@ std::tuple<uint32_t, bool> lineSize(uint32_t minStride, uint32_t cacheSize) {
     // at least half of the pairs (p + lp) do not have
     // jumps, then we are now greater than the cache size
     if (jumpsCount < p / 2) {
-      uint32_t lineSize = (1 << p) * sizeof(uint32_t);
+      uint32_t lineSize = (1 << (p - 1)) * sizeof(uint32_t);
       return {lineSize, true};
     }
 
