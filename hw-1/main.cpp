@@ -5,15 +5,15 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <random>
 #include <string>
-#include <vector>
 
 using namespace std::chrono;
 
 const uint32_t ARRAY_READS_COUNT = 1'000'000;
-const uint32_t WARMUP_READS_COUNT = 5'000;
-const uint32_t BATCHES_COUNT = 5;
+const uint32_t WARMUP_READS_COUNT = 100'000;
+const uint32_t BATCHES_COUNT = 1;
 const uint32_t PAGE_SIZE = (1 << 16); // 64 KB
 const uint32_t TIME_DIV_FACTOR = 10'000;
 bool debug = false;
@@ -179,6 +179,12 @@ bool isSufficientIncrease(timetype currentTime, timetype prevTime,
   return delta > timetype::zero() && div > fraction;
 }
 
+bool isSuffientDiff(timetype currentTime, timetype prevTime, double fraction) {
+  double delta = std::abs((currentTime - prevTime).count());
+  auto div = delta / prevTime.count();
+  return div > fraction;
+}
+
 timetype getAveragedDelta(const std::vector<std::vector<timetype>> &times,
                           uint32_t fromElem, uint32_t toElem,
                           uint32_t stridePow) {
@@ -276,93 +282,89 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t minStride,
   return {cacheAssociativity, cacheSize, found};
 }
 
-std::tuple<uint32_t, bool> lineSize(uint32_t minStride, uint32_t cacheSize) {
-  uint32_t minStridePow = calcLog2(minStride / sizeof(uint32_t));
-  uint32_t maxStridePow = calcLog2(cacheSize / sizeof(uint32_t));
-  uint32_t offsetFactor = 4;
-  double fraction = 0.20;
+timetype averageTime(uint32_t higherStride, uint32_t lowerStride,
+                     uint32_t maxSpots) {
+  uint32_t stride = higherStride + lowerStride;
+  timetype totalTime = timetype::zero();
+  for (uint32_t spots = 1; spots <= maxSpots; spots++) {
+    totalTime += timeOfArrayRead(stride, spots, ARRAY_READS_COUNT,
+                                 WARMUP_READS_COUNT, BATCHES_COUNT);
+  }
+  return totalTime / maxSpots;
+}
 
-  for (uint32_t p = minStridePow; p < maxStridePow; p++) {
-    uint32_t higherStride = (1 << p);
-    uint32_t baseSpots = cacheSize / (higherStride * sizeof(uint32_t));
-    timetype baseTime =
-        timeOfArrayRead(higherStride, baseSpots, ARRAY_READS_COUNT,
-                        WARMUP_READS_COUNT, BATCHES_COUNT);
+uint32_t lineSize(uint32_t minStride, uint32_t maxStride, uint32_t cacheSize) {
+  log() << "Min stride: " << bytesToString(minStride) << std::endl;
+  log() << "Max stride: " << bytesToString(maxStride) << std::endl;
+  uint32_t maxSpots = 1024;
+  enum Trend : int { DEC = 0, STABLE = 1, INC = 2 };
+  std::vector<Trend> trends(calcLog2(maxStride / minStride));
 
-    uint32_t baseLeftSpots = baseSpots - baseSpots / offsetFactor;
-    timetype baseLeftTime =
-        timeOfArrayRead(higherStride, baseLeftSpots, ARRAY_READS_COUNT,
-                        WARMUP_READS_COUNT, BATCHES_COUNT);
-    uint32_t baseRightSpots = baseSpots + baseSpots / offsetFactor;
-    timetype baseRightTime =
-        timeOfArrayRead(higherStride, baseRightSpots, ARRAY_READS_COUNT,
-                        WARMUP_READS_COUNT, BATCHES_COUNT);
+  for (uint32_t higherStride = minStride; higherStride <= maxStride;
+       higherStride *= 2) {
+    timetype higherTime =
+        averageTime(higherStride / sizeof(uint32_t), 0, maxSpots);
+    log() << "Higher stride: " << bytesToString(higherStride)
+          << ", time: " << higherTime.count() / TIME_DIV_FACTOR << std::endl;
 
-    log() << "Base stride: " << bytesToString(higherStride * sizeof(uint32_t))
-          << ", Spots: " << baseSpots << ", AMAT: "
-          << static_cast<double>(baseTime.count()) / ARRAY_READS_COUNT
+    uint32_t increases = 0, decreases = 0;
+    // Start from 4 values below the higher stride
+    for (uint32_t lowerStride = higherStride / 16; lowerStride < higherStride;
+         lowerStride *= 2) {
+      timetype combinedTime =
+          averageTime(higherStride / sizeof(uint32_t),
+                      lowerStride / sizeof(uint32_t), maxSpots);
+      log() << "  Lower stride: " << bytesToString(lowerStride)
+            << ", time: " << combinedTime.count() / TIME_DIV_FACTOR
+            << std::endl;
+
+      if (isSuffientDiff(combinedTime, higherTime, 0.1)) {
+        if (combinedTime > higherTime) {
+          increases++;
+        } else {
+          decreases++;
+        }
+      }
+    }
+    log() << "Increases: " << increases << ", decreases: " << decreases
           << std::endl;
-    log() << "  Left AMAT: "
-          << static_cast<double>(baseLeftTime.count()) / ARRAY_READS_COUNT
-          << " (spots: " << baseLeftSpots << ")"
-          << ", Right AMAT: "
-          << static_cast<double>(baseRightTime.count()) / ARRAY_READS_COUNT
-          << " (spots: " << baseRightSpots << ")" << std::endl;
 
-    uint32_t jumpsCount = 0;
-    for (uint32_t lp = 0; lp < p; lp++) { // lower stride pow
-      // find the elems count where the jump occurs for stride (p + lp)
-      // save
-      uint32_t lowerStride = (1 << lp);
-      uint32_t spotsWhenHigherStrideIsLessThanLineSize =
-          cacheSize / ((higherStride + lowerStride) * sizeof(uint32_t));
-      timetype currentTime = timeOfArrayRead(
-          higherStride + lowerStride, spotsWhenHigherStrideIsLessThanLineSize,
-          ARRAY_READS_COUNT, WARMUP_READS_COUNT, BATCHES_COUNT);
-
-      log() << "Lower stride: " << bytesToString(lowerStride * sizeof(uint32_t))
-            << ", Spots: " << spotsWhenHigherStrideIsLessThanLineSize
-            << ", AMAT: "
-            << static_cast<double>(currentTime.count()) / ARRAY_READS_COUNT
-            << std::endl;
-
-      uint32_t leftSpots =
-          spotsWhenHigherStrideIsLessThanLineSize -
-          spotsWhenHigherStrideIsLessThanLineSize / offsetFactor;
-      timetype leftTime =
-          timeOfArrayRead(higherStride + lowerStride, leftSpots,
-                          ARRAY_READS_COUNT, WARMUP_READS_COUNT, BATCHES_COUNT);
-      // small step to the right, exact base spots does not always differs
-      // enough
-      uint32_t rightSpots = baseRightSpots;
-      timetype rightTime =
-          timeOfArrayRead(higherStride + lowerStride, rightSpots,
-                          ARRAY_READS_COUNT, WARMUP_READS_COUNT, BATCHES_COUNT);
-      log() << "  Left AMAT: "
-            << static_cast<double>(leftTime.count()) / ARRAY_READS_COUNT
-            << " (spots: " << leftSpots << ")"
-            << ", Right AMAT: "
-            << static_cast<double>(rightTime.count()) / ARRAY_READS_COUNT
-            << " (spots: " << rightSpots << ")";
-
-      bool isJump = isSufficientIncrease(rightTime, leftTime, fraction);
-      log() << ", isJump: " << isJump
-            << ", frac: " << (rightTime - leftTime) / (1.0 * leftTime)
-            << std::endl;
-      jumpsCount += isJump;
+    uint32_t p = calcLog2(higherStride / minStride);
+    trends[p] = Trend::STABLE;
+    if (increases > decreases) {
+      trends[p] = Trend::INC;
+    } else if (increases < decreases) {
+      trends[p] = Trend::DEC;
     }
-
-    // at least half of the pairs (p + lp) do not have
-    // jumps, then we are now greater than the cache size
-    if (jumpsCount < p / 2) {
-      uint32_t lineSize = (1 << (p - 1)) * sizeof(uint32_t);
-      return {lineSize, true};
-    }
-
-    log() << "==========" << std::endl;
   }
 
-  return {0, false};
+  uint32_t lineSize = 0;
+  bool candidateFound = false;
+
+  // trend sequence from which we can determine cache line looks like this:
+  // [INC|STABLE]* [DEC|STABLE]*
+  for (uint32_t p = 1; p < trends.size(); p++) {
+    uint32_t stride = (1 << p) * minStride;
+    Trend trend = trends[p];
+    log() << "Stride: " << bytesToString(stride) << ", trend: " << trend
+          << std::endl;
+
+    if (trend == Trend::DEC && !candidateFound) {
+      // found first decrease
+      lineSize = stride / 2; // previous value
+      candidateFound = true;
+    } else if (trend == Trend::INC && candidateFound) {
+      // found increase after decrease -> we cannot determine the cache line
+      return 0;
+    }
+  }
+
+  if (!candidateFound) {
+    // if no decrease found, assume the line size is the maximum we tested
+    lineSize = maxStride;
+  }
+
+  return lineSize;
 }
 
 int main(int argc, char *argv[]) {
@@ -383,21 +385,22 @@ int main(int argc, char *argv[]) {
   std::cout << "array: " << array << std::endl;
   std::cout << "len: " << arrayLen << std::endl;
 
-  auto [cacheAssociativity, cacheSize, detected] =
-      capacityAndAssociativity(maxAssoc + 1, minStride, maxStride);
+  // auto [cacheAssociativity, cacheSize, detected] =
+  //     capacityAndAssociativity(maxAssoc + 1, minStride, maxStride);
 
-  if (detected) {
-    std::cout << "Detected L1 cache associativity: " << cacheAssociativity
-              << std::endl;
-    std::cout << "Detected L1 cache size: " << bytesToString(cacheSize)
-              << std::endl;
-  } else {
-    std::cout << "Could not detect L1 cache associativity and size."
-              << std::endl;
-  }
+  // if (detected) {
+  //   std::cout << "Detected L1 cache associativity: " << cacheAssociativity
+  //             << std::endl;
+  //   std::cout << "Detected L1 cache size: " << bytesToString(cacheSize)
+  //             << std::endl;
+  // } else {
+  //   std::cout << "Could not detect L1 cache associativity and size."
+  //             << std::endl;
+  // }
 
-  auto [lineSizeBytes, lineSizeDetected] = lineSize(minStride, cacheSize);
-  if (lineSizeDetected) {
+  uint32_t cacheSize = 128 * 1024;
+  auto lineSizeBytes = lineSize(minStride, 1024, cacheSize);
+  if (lineSizeBytes != 0) {
     std::cout << "Detected cache line size: " << bytesToString(lineSizeBytes)
               << std::endl;
   } else {
