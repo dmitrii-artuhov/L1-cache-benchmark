@@ -222,10 +222,10 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t minStride,
   }
 
   // calculate cumulative jumps
-  uint32_t span = 4;
-  double fraction = 0.3;
+  uint32_t span = 2;
+  double fraction = 0.27;
   for (uint32_t p = 0; p < stridePow; p++) {
-    for (uint32_t elem = span + 1; elem + span <= maxAssoc; elem++) {
+    for (uint32_t elem = span + 1; elem + span <= maxAssoc; elem += 2) {
       // find a jump between averaged time[(elem - span)..elem) and
       // time[elem..(elem + span)) for some fixed p
       timetype prevDelta = getAveragedDelta(times, elem - span, elem, p);
@@ -248,13 +248,13 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t minStride,
   bool found = false;
 
   for (uint32_t p = 0; p < stridePow && !found; p++) {
-    for (uint32_t elem = 1; elem < maxAssoc && !found; elem *= 2) {
+    for (uint32_t elem = 2; elem < maxAssoc && !found; elem += 2) {
       if (!jumps[elem][p])
         continue;
 
       uint32_t assoc = elem;
       uint32_t stride = p;
-      while (assoc >= 1 && stride + 2 < stridePow) {
+      while (assoc >= 1 && assoc % 2 == 0 && stride + 2 < stridePow) {
         bool jumpMoved = jumps[assoc / 2][stride + 1];
         bool jumpThenStayed = jumps[assoc / 2][stride + 2];
 
