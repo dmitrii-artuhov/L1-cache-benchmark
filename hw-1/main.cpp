@@ -203,15 +203,15 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t minStride,
   uint32_t stridePow = 0;
   // matrix elems x strides
   std::vector<std::vector<timetype>> times(
-      maxAssoc + 1, std::vector<timetype>(maxStride + 1, timetype{}));
-  std::vector<std::vector<bool>> jumps(maxAssoc + 1,
-                                       std::vector<bool>(maxStride + 1, false));
+      maxAssoc, std::vector<timetype>(maxStride, timetype{}));
+  std::vector<std::vector<bool>> jumps(maxAssoc,
+                                       std::vector<bool>(maxStride, false));
 
   // calculate averaged execution times for each (elems, stride)
   while (stride * sizeof(uint32_t) <= maxStride) {
     uint32_t elems = 1;
     // calculate time jumps
-    while (elems <= maxAssoc) {
+    while (elems < maxAssoc) {
       timetype currentTime = timeOfArrayRead(stride, elems, ARRAY_READS_COUNT,
                                              WARMUP_READS_COUNT, BATCHES_COUNT);
       times[elems][stridePow] = currentTime;
@@ -222,10 +222,15 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t minStride,
   }
 
   // calculate cumulative jumps
-  double fraction = 0.17;
+  uint32_t span = 4;
+  double fraction = 0.3;
   for (uint32_t p = 0; p < stridePow; p++) {
-    for (uint32_t elem = 1; elem <= maxAssoc; elem++) {
-      bool isJump = isSufficientIncrease(times[elem][p], times[elem - 1][p], fraction);
+    for (uint32_t elem = span + 1; elem + span <= maxAssoc; elem++) {
+      // find a jump between averaged time[(elem - span)..elem) and
+      // time[elem..(elem + span)) for some fixed p
+      timetype prevDelta = getAveragedDelta(times, elem - span, elem, p);
+      timetype currentDelta = getAveragedDelta(times, elem, elem + span, p);
+      bool isJump = isSufficientIncrease(currentDelta, prevDelta, fraction);
       jumps[elem - 1][p] = isJump; // write at elem - 1, so that we see jumps at
                                    // elems 2^t and not 2^t + 1 indexes
     }
@@ -243,7 +248,7 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t minStride,
   bool found = false;
 
   for (uint32_t p = 0; p < stridePow && !found; p++) {
-    for (uint32_t elem = 1; elem < maxAssoc && !found; elem++) {
+    for (uint32_t elem = 1; elem < maxAssoc && !found; elem *= 2) {
       if (!jumps[elem][p])
         continue;
 
@@ -379,7 +384,7 @@ int main(int argc, char *argv[]) {
   std::cout << "len: " << arrayLen << std::endl;
 
   auto [cacheAssociativity, cacheSize, detected] =
-      capacityAndAssociativity(maxAssoc, minStride, maxStride);
+      capacityAndAssociativity(maxAssoc + 1, minStride, maxStride);
 
   if (detected) {
     std::cout << "Detected L1 cache associativity: " << cacheAssociativity
