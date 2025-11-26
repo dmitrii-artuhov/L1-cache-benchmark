@@ -5,15 +5,14 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <random>
 #include <string>
-#include <map>
 
 using namespace std::chrono;
 
 const uint32_t ARRAY_READS_COUNT = 1'000'000;
 const uint32_t WARMUP_READS_COUNT = 1'000'000;
-const uint32_t BATCHES_COUNT = 1;
 const uint32_t PAGE_SIZE = (1 << 16); // 64 KB
 const uint32_t TIME_DIV_FACTOR = 10'000;
 bool debug = false;
@@ -74,8 +73,7 @@ uint32_t calcLog2(uint32_t n) {
 
 void prettyPrint(uint32_t maxAssoc, uint32_t minStride, uint32_t stridePow,
                  const std::vector<std::vector<timetype>> &times,
-                 const std::vector<std::vector<bool>> &jumps, uint32_t width,
-                 uint32_t timeFactor) {
+                 const std::vector<std::vector<bool>> &jumps, uint32_t width) {
   // printing results
   log() << std::setw(width) << "s/e";
   for (uint32_t p = 0; p < stridePow; p++) {
@@ -87,7 +85,7 @@ void prettyPrint(uint32_t maxAssoc, uint32_t minStride, uint32_t stridePow,
   for (uint32_t s = 1; s < maxAssoc; s++) {
     log() << std::setw(width) << s;
     for (uint32_t p = 0; p < stridePow; p++) {
-      auto time = times[s][p].count() / timeFactor;
+      auto time = times[s][p].count() / TIME_DIV_FACTOR;
       std::string timeWithJump =
           (jumps[s][p] ? "[+]" : "") + std::to_string(time);
       log() << std::setw(width) << timeWithJump;
@@ -144,17 +142,17 @@ void fillShuffledIndexes(uint32_t stride, uint32_t elems) {
   }
 }
 
-timetype timeOfArrayRead(uint32_t stride, uint32_t elems, uint32_t readsCount,
-                         uint32_t warmupReadsCount, uint32_t batchesCount) {
+timetype timeOfArrayRead(uint32_t stride, uint32_t elems,
+                         uint32_t batchesCount = 1) {
   volatile uint32_t sink = 0; // prevents optimization
   timetype diff = timetype::zero();
-  uint32_t iterationsPerBatch = readsCount;
+  uint32_t iterationsPerBatch = ARRAY_READS_COUNT;
   for (uint32_t batch = 0; batch < batchesCount; ++batch) {
     // fill indexes
     fillShuffledIndexes(stride, elems);
 
     // some reads to warm up cache
-    for (uint32_t i = 0, idx = 0; i < warmupReadsCount; i++) {
+    for (uint32_t i = 0, idx = 0; i < WARMUP_READS_COUNT; i++) {
       idx = array[idx];
       sink = idx;
     }
@@ -206,14 +204,14 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t minStride,
       maxAssoc, std::vector<timetype>(maxStride, timetype{}));
   std::vector<std::vector<bool>> jumps(maxAssoc,
                                        std::vector<bool>(maxStride, false));
+  uint32_t batches = 3;
 
   // calculate averaged execution times for each (elems, stride)
   while (stride * sizeof(uint32_t) <= maxStride) {
     uint32_t elems = 1;
     // calculate time jumps
     while (elems < maxAssoc) {
-      timetype currentTime = timeOfArrayRead(stride, elems, ARRAY_READS_COUNT,
-                                             WARMUP_READS_COUNT, BATCHES_COUNT);
+      timetype currentTime = timeOfArrayRead(stride, elems, batches);
       times[elems][stridePow] = currentTime;
       elems++;
     }
@@ -223,7 +221,7 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t minStride,
 
   // calculate cumulative jumps
   uint32_t span = 2;
-  double fraction = 0.27;
+  double fraction = 0.3;
   for (uint32_t p = 0; p < stridePow; p++) {
     for (uint32_t elem = span + 1; elem + span <= maxAssoc; elem += 2) {
       // find a jump between averaged time[(elem - span)..elem) and
@@ -277,7 +275,7 @@ capacityAndAssociativity(uint32_t maxAssoc, uint32_t minStride,
   }
 
   // print a table
-  prettyPrint(maxAssoc, minStride, stridePow, times, jumps, 8, TIME_DIV_FACTOR);
+  prettyPrint(maxAssoc, minStride, stridePow, times, jumps, 8);
 
   return {cacheAssociativity, cacheSize, found};
 }
@@ -287,8 +285,7 @@ timetype averageTime(uint32_t higherStride, uint32_t lowerStride,
   uint32_t stride = higherStride + lowerStride;
   timetype totalTime = timetype::zero();
   for (uint32_t spots = 1; spots <= maxSpots; spots++) {
-    totalTime += timeOfArrayRead(stride, spots, ARRAY_READS_COUNT,
-                                 WARMUP_READS_COUNT, BATCHES_COUNT);
+    totalTime += timeOfArrayRead(stride, spots);
   }
   return totalTime / maxSpots;
 }
